@@ -1,11 +1,8 @@
-langgraph
+streamlit
+chromadb>=0.4.15
 langchain
-langchain-community
-langchain_google_genai
+langchain-openai
 python-dotenv
 pypdf
-chromadb
 sentence-transformers
-tavily-python
-fastapi
-uvicorn
+openai
