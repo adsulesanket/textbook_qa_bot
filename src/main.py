@@ -29,15 +29,15 @@ def ask_question(query: Query):
     try:
         # Define the initial input for the graph
         inputs = GraphState(
-            question=query.question, 
-            documents=[], 
-            web_search_results="", 
+            question=query.question,
+            documents=[],
+            web_search_results="",
             generation=""
         )
-        
+
         # Invoke the graph to get the final result
         final_state = langgraph_app.invoke(inputs)
-        
+
         # Return the final generated answer
         return {"answer": final_state['generation']}
 
