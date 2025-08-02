@@ -1,15 +1,9 @@
 streamlit
-chromadb>=0.4.15
 langchain
 langchain-openai
-langchain-google-genai
 python-dotenv
 pypdf
 sentence-transformers
 openai
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
-grpcio
-protobuf
+faiss-cpu
+numpy
