@@ -48,3 +48,9 @@ def ask_question(query: Query):
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Textbook Q&A Agent API. Please use the /ask endpoint to post your questions."}
+
+
+
+
+
+
