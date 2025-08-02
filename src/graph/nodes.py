@@ -1,119 +1,121 @@
-import logging
+import os
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.schema import Document
 from langchain.prompts import PromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_community.tools.tavily_search import TavilySearchResults
+from typing import List, Dict, Any
+import streamlit as st
+from src.config import GOOGLE_API_KEY, LLM_MODEL_NAME, TEMPERATURE
+from src.vector_store import search_documents
 
-# Import from our project structure
-from src.vector_store import get_vector_store, build_or_get_collection
-from src.config import GOOGLE_API_KEY, TAVILY_API_KEY, LLM_MODEL_NAME
-from .state import GraphState
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Initialize LLM and Tools
-llm = ChatGoogleGenerativeAI(google_api_key=GOOGLE_API_KEY, model=LLM_MODEL_NAME, temperature=0)
-web_search_tool = TavilySearchResults(tavily_api_key=TAVILY_API_KEY, max_results=3)
-
-# --- Node Functions ---
-
-def retrieve(state: GraphState) -> GraphState:
-    """Retrieves documents from the vector store."""
-    logging.info("Node: Retrieving documents...")
-    question = state["question"]
-    client, embedding_func = get_vector_store()
-    collection = build_or_get_collection(client, embedding_func)
-    results = collection.query(query_texts=[question], n_results=3)
-    return {"documents": results['documents'][0], "question": question}
-
-def grade_documents(state: GraphState) -> GraphState:
-    """
-    Determines whether the retrieved documents are relevant to the question.
-    """
-    logging.info("Node: Grading documents...")
-    question = state["question"]
-    documents = state["documents"]
-
-    prompt = PromptTemplate(
-        template="""You are a grader assessing relevance of a retrieved document to a user question.
-        If the document contains keywords related to the user question, grade it as relevant.
-        It does not need to be a stringent test. The goal is to filter out erroneous retrievals.
-
-        Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question.
-        Provide the binary score as a JSON with a single key 'score' and no preamble or explanation.
-
-        Here is the retrieved document:
-        \n---\n
-        {document}
-        \n---\n
-        Here is the user question: {question}
-        """,
-        input_variables=["document", "question"],
+# Initialize Google Gemini model
+@st.cache_resource
+def get_llm():
+    return ChatGoogleGenerativeAI(
+        model=LLM_MODEL_NAME,
+        temperature=TEMPERATURE,
+        google_api_key=GOOGLE_API_KEY
     )
 
-    parser = JsonOutputParser()
-    chain = prompt | llm | parser
-
-    # Grade each document
-    filtered_docs = []
-    for d in documents:
-        score = chain.invoke({"document": d, "question": question})
-        grade = score['score']
-        if grade.lower() == "yes":
-            logging.info("Document is relevant.")
-            filtered_docs.append(d)
-        else:
-            logging.info("Document is NOT relevant.")
-            continue
-    return {"documents": filtered_docs, "question": question}
-
-def generate(state: GraphState) -> GraphState:
-    """Generates an answer using the retrieved documents."""
-    logging.info("Node: Generating answer from documents...")
-    question = state["question"]
-    documents = state["documents"]
+def retrieve(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Retrieve documents from vector store"""
+    query = state.get("question", "")
     
-    prompt_template = """You are an expert AI tutor. Use the following retrieved context to answer the user's question.
-    If you don't know the answer from the context, state that you don't know. Respond in the same language as the question.
+    # Search documents using our vector store
+    documents = search_documents(query, k=5)
+    
+    state["documents"] = documents
+    state["context"] = "\n\n".join([doc.page_content for doc in documents])
+    
+    return state
 
-    Context:
-    {context}
+def grade_documents(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Grade retrieved documents for relevance"""
+    question = state.get("question", "")
+    documents = state.get("documents", [])
     
-    Question:
-    {question}
-    """
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    chain = prompt | llm
+    if not documents:
+        state["relevant_documents"] = []
+        return state
     
-    context_str = "\n\n".join(documents)
-    generation = chain.invoke({"context": context_str, "question": question}).content
-    return {"generation": generation}
+    llm = get_llm()
+    
+    # Simple grading prompt
+    grade_prompt = PromptTemplate(
+        template="""You are a grader assessing relevance of retrieved documents to a user question.
+        
+        Question: {question}
+        
+        Document: {document}
+        
+        Give a binary score 'yes' or 'no' to indicate whether the document is relevant to the question.
+        Respond with just 'yes' or 'no'.""",
+        input_variables=["question", "document"]
+    )
+    
+    relevant_docs = []
+    for doc in documents:
+        try:
+            prompt_text = grade_prompt.format(question=question, document=doc.page_content)
+            grade = llm.invoke(prompt_text)
+            if "yes" in grade.content.lower():
+                relevant_docs.append(doc)
+        except Exception as e:
+            st.error(f"Error grading document: {e}")
+            # Include document if grading fails
+            relevant_docs.append(doc)
+    
+    state["relevant_documents"] = relevant_docs
+    return state
 
-def web_search(state: GraphState) -> GraphState:
-    """Performs a web search for the user's question."""
-    logging.info("Node: Performing web search...")
-    question = state["question"]
-    search_results = web_search_tool.invoke({"query": question})
-    return {"web_search_results": search_results, "question": question}
+def generate(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate answer from relevant documents"""
+    question = state.get("question", "")
+    relevant_docs = state.get("relevant_documents", [])
     
-def generate_from_web(state: GraphState) -> GraphState:
-    """Generates an answer using the web search results."""
-    logging.info("Node: Generating answer from web search...")
-    question = state["question"]
-    web_results = state["web_search_results"]
+    if not relevant_docs:
+        state["answer"] = "I couldn't find relevant information to answer your question."
+        return state
+    
+    llm = get_llm()
+    
+    # Create context from relevant documents
+    context = "\n\n".join([doc.page_content for doc in relevant_docs])
+    
+    # Generate answer prompt
+    answer_prompt = PromptTemplate(
+        template="""You are an assistant for question-answering tasks. 
+        Use the following pieces of retrieved context to answer the question. 
+        If you don't know the answer, just say that you don't know. 
+        Use three sentences maximum and keep the answer concise.
+        
+        Question: {question}
+        
+        Context: {context}
+        
+        Answer:""",
+        input_variables=["question", "context"]
+    )
+    
+    try:
+        prompt_text = answer_prompt.format(question=question, context=context)
+        response = llm.invoke(prompt_text)
+        state["answer"] = response.content
+    except Exception as e:
+        st.error(f"Error generating answer: {e}")
+        state["answer"] = "Sorry, I encountered an error while generating the answer."
+    
+    return state
 
-    prompt_template = """You are an expert AI assistant. Use the following web search results to answer the user's question.
-    Provide a concise answer based on the information found. Respond in the same language as the question.
+def web_search(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Perform web search (placeholder - requires Tavily API)"""
+    # For now, just return empty results
+    # You can implement actual web search later with Tavily API
+    state["web_results"] = []
+    return state
 
-    Web Search Results:
-    {web_results}
-    
-    Question:
-    {question}
-    """
-    prompt = PromptTemplate(template=prompt_template, input_variables=["web_results", "question"])
-    chain = prompt | llm
-    
-    generation = chain.invoke({"web_results": web_results, "question": question}).content
-    return {"generation": generation}
+def generate_from_web(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate answer from web search results"""
+    # Placeholder implementation
+    question = state.get("question", "")
+    state["answer"] = f"Web search is not implemented yet for: {question}"
+    return state

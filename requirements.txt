@@ -1,9 +1,0 @@
-streamlit
-langchain
-langchain-openai
-python-dotenv
-pypdf
-sentence-transformers
-openai
-faiss-cpu
-numpy

@@ -1,45 +1,84 @@
 import streamlit as st
-from src.graph.builder import build_graph
-from src.graph.state import GraphState
+import os
+from dotenv import load_dotenv
 
-# --- App Configuration ---
-st.set_page_config(page_title="Textbook Q&A Chatbot", page_icon="📚")
-st.title("📚 Textbook Q&A Chatbot")
-st.write("Ask a question about your textbooks. The agent can also search the web if needed.")
+# Load environment variables
+load_dotenv()
 
-# --- Initialize the LangGraph Agent ---
-# Use a cached function to build the graph only once
-@st.cache_resource
-def load_agent():
-    return build_graph()
+# Import your modules
+try:
+    from src.vector_store import add_documents_to_store, search_documents
+    from src.nodes import retrieve, grade_documents, generate
+except ImportError as e:
+    st.error(f"Import error: {e}")
+    st.stop()
 
-app = load_agent()
-
-# --- Chat History Management ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# --- Handle User Input ---
-if prompt := st.chat_input("Ask your question..."):
-    # Add user message to chat history
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    # Display user message
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Display AI response
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            # Define the initial state for the graph
-            inputs = GraphState(question=prompt, documents=[], web_search_results="", generation="")
-            # Invoke the agent
-            final_state = app.invoke(inputs)
-            response = final_state['generation']
-            st.markdown(response)
+def main():
+    st.title("📚 Textbook Q&A Bot")
+    st.write("Upload your textbooks and ask questions using Google Gemini!")
     
-    # Add AI response to chat history
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    # Check for Google API key
+    if not os.getenv("GOOGLE_API_KEY"):
+        st.error("Please set your GOOGLE_API_KEY in the secrets or environment variables.")
+        st.info("Get your free Google API key from: https://makersuite.google.com/app/apikey")
+        st.stop()
+    
+    # File upload
+    uploaded_files = st.file_uploader(
+        "Choose PDF files", 
+        type="pdf", 
+        accept_multiple_files=True
+    )
+    
+    if uploaded_files:
+        with st.spinner("Processing documents..."):
+            # Add documents to vector store
+            docs = add_documents_to_store(uploaded_files)
+            if docs:
+                st.success(f"Processed {len(uploaded_files)} files with {len(docs)} chunks successfully!")
+            else:
+                st.error("Failed to process documents.")
+    
+    # Question input
+    question = st.text_input("Ask a question about your textbooks:")
+    
+    if st.button("Get Answer") and question:
+        if not uploaded_files:
+            st.warning("Please upload some PDF files first.")
+            return
+            
+        with st.spinner("Searching for answer..."):
+            try:
+                # Create state
+                state = {"question": question}
+                
+                # Retrieve documents
+                state = retrieve(state)
+                
+                # Grade documents
+                state = grade_documents(state)
+                
+                # Generate answer
+                state = generate(state)
+                
+                # Display answer
+                if state.get("answer"):
+                    st.write("### Answer:")
+                    st.write(state["answer"])
+                    
+                    # Show relevant documents
+                    if state.get("relevant_documents"):
+                        with st.expander("View source documents"):
+                            for i, doc in enumerate(state["relevant_documents"]):
+                                st.write(f"**Document {i+1}:**")
+                                st.write(doc.page_content[:500] + "...")
+                                st.write("---")
+                else:
+                    st.error("Could not generate an answer.")
+                    
+            except Exception as e:
+                st.error(f"Error processing question: {e}")
+                st.error("Make sure your Google API key is valid and has Gemini API access enabled.")
+
+if __name__ == "__main__":
+    main()

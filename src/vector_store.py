@@ -1,43 +1,42 @@
 import streamlit as st
 import os
-from langchain.vectorstores import FAISS
-from langchain.embeddings import OpenAIEmbeddings
+from langchain.embeddings import HuggingFaceEmbeddings  # Free embeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.document_loaders import PyPDFLoader
+from langchain.schema import Document
 import tempfile
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Store documents in session state
+if 'documents' not in st.session_state:
+    st.session_state.documents = []
+if 'embeddings_cache' not in st.session_state:
+    st.session_state.embeddings_cache = []
 
 @st.cache_resource
 def get_embeddings():
-    """Get OpenAI embeddings"""
-    return OpenAIEmbeddings(
-        openai_api_key=os.getenv("OPENAI_API_KEY")
+    """Get free HuggingFace embeddings (no API key needed)"""
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
-@st.cache_resource
 def get_vector_store():
-    """Initialize empty FAISS vector store"""
-    embeddings = get_embeddings()
-    
-    # Create a dummy document to initialize FAISS
-    from langchain.schema import Document
-    dummy_doc = Document(page_content="Initialization document", metadata={})
-    
-    # Create FAISS vector store with dummy document
-    vector_store = FAISS.from_documents([dummy_doc], embeddings)
-    
-    return vector_store
+    """Return a simple document store"""
+    return st.session_state.documents
 
 def build_or_get_collection():
-    """Get the FAISS collection"""
+    """Get the document collection"""
     return get_vector_store()
 
 def add_documents_to_store(uploaded_files):
-    """Add uploaded PDF documents to the vector store"""
+    """Add uploaded PDF documents to the store"""
     if not uploaded_files:
         return None
         
-    embeddings = get_embeddings()
-    all_documents = []
+    # Clear existing documents
+    st.session_state.documents = []
+    st.session_state.embeddings_cache = []
     
     # Process each uploaded file
     for uploaded_file in uploaded_files:
@@ -57,27 +56,53 @@ def add_documents_to_store(uploaded_files):
                 chunk_overlap=200
             )
             split_docs = text_splitter.split_documents(documents)
-            all_documents.extend(split_docs)
+            
+            # Add to session state
+            st.session_state.documents.extend(split_docs)
+            
+        except Exception as e:
+            st.error(f"Error processing {uploaded_file.name}: {e}")
             
         finally:
             # Clean up temp file
             os.unlink(tmp_file_path)
     
-    if all_documents:
-        # Create new FAISS vector store with documents
-        vector_store = FAISS.from_documents(all_documents, embeddings)
-        return vector_store
-    
-    return None
+    return st.session_state.documents
 
-def search_documents(vector_store, query, k=5):
-    """Search documents in the vector store"""
-    if vector_store is None:
+def search_documents(query, k=5):
+    """Search documents using simple similarity"""
+    if not st.session_state.documents:
         return []
     
     try:
-        results = vector_store.similarity_search(query, k=k)
-        return results
+        embeddings_model = get_embeddings()
+        
+        # Get query embedding
+        query_embedding = embeddings_model.embed_query(query)
+        
+        # Calculate embeddings for documents if not cached
+        if len(st.session_state.embeddings_cache) != len(st.session_state.documents):
+            st.session_state.embeddings_cache = []
+            with st.spinner("Computing document embeddings..."):
+                for doc in st.session_state.documents:
+                    doc_embedding = embeddings_model.embed_documents([doc.page_content])[0]
+                    st.session_state.embeddings_cache.append(doc_embedding)
+        
+        # Calculate similarities
+        similarities = []
+        for i, doc_embedding in enumerate(st.session_state.embeddings_cache):
+            similarity = cosine_similarity([query_embedding], [doc_embedding])[0][0]
+            similarities.append((similarity, i))
+        
+        # Sort by similarity and return top k
+        similarities.sort(reverse=True)
+        top_docs = []
+        for similarity, idx in similarities[:k]:
+            if similarity > 0.1:  # Minimum similarity threshold
+                top_docs.append(st.session_state.documents[idx])
+        
+        return top_docs
+        
     except Exception as e:
         st.error(f"Error searching documents: {e}")
         return []
