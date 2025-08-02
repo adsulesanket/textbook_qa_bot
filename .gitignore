@@ -1,0 +1,13 @@
+# Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local Data and Database
+data/chroma_db/
+data/raw_pdfs/
+
+# Environment variables
+.env
